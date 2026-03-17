@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -40,11 +41,15 @@ type PlaylistItem struct {
 func NewService(refreshToken string, store *models.Store) *Service {
 	clientID := os.Getenv("YOUTUBE_CLIENT_ID")
 	clientSecret := os.Getenv("YOUTUBE_CLIENT_SECRET")
+	redirectURL := os.Getenv("YOUTUBE_REDIRECT_URL")
+	if redirectURL == "" {
+		redirectURL = "http://localhost:8080/auth/callback"
+	}
 
 	config := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
-		RedirectURL:  "https://bangerfriday.dk/auth/callback",
+		RedirectURL:  redirectURL,
 		Scopes:       []string{youtube.YoutubeScope},
 		Endpoint:     google.Endpoint,
 	}
@@ -117,7 +122,7 @@ func (s *Service) SearchVideos(query string) ([]Video, error) {
 		if strings.Contains(lowerTitle, "channel") ||
 			strings.Contains(lowerTitle, "playlist") ||
 			strings.Contains(lowerTitle, "movie") ||
-			strings.Contains(lowerTitle, "trailer") && !strings.Contains(lowerTitle, "music") ||
+			(strings.Contains(lowerTitle, "trailer") && !strings.Contains(lowerTitle, "music")) ||
 			strings.Contains(lowerChannel, "channel") {
 			continue
 		}
@@ -249,12 +254,15 @@ func (s *Service) AddVideoToPlaylist(ctx context.Context, playlistID, videoID, a
 	}
 
 	date := time.Now().Format("2006-01-02")
-	s.store.AddTrackAddition(&models.TrackAddition{
+	_, err = s.store.AddTrackAddition(&models.TrackAddition{
 		VideoID:   videoID,
 		Date:      date,
 		AddedBy:   addedBy,
 		CreatedAt: time.Now().Unix(),
 	})
+	if err != nil {
+		log.Printf("warning: failed to track addition video=%s added_by=%s date=%s err=%v", videoID, addedBy, date, err)
+	}
 
 	return nil
 }
@@ -270,21 +278,33 @@ func (s *Service) RemoveVideoFromPlaylist(ctx context.Context, playlistID, video
 		return fmt.Errorf("error creating YouTube service: %v", err)
 	}
 
-	call := service.PlaylistItems.List([]string{"id", "snippet"}).
-		PlaylistId(playlistID).
-		MaxResults(50)
-
-	response, err := call.Do()
-	if err != nil {
-		return fmt.Errorf("error getting playlist items: %v", err)
-	}
-
 	var playlistItemID string
-	for _, item := range response.Items {
-		if item.Snippet.ResourceId.VideoId == videoID {
-			playlistItemID = item.Id
+	pageToken := ""
+	for {
+		call := service.PlaylistItems.List([]string{"id", "snippet"}).
+			PlaylistId(playlistID).
+			MaxResults(50)
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		response, err := call.Do()
+		if err != nil {
+			return fmt.Errorf("error getting playlist items: %v", err)
+		}
+
+		for _, item := range response.Items {
+			if item.Snippet.ResourceId.VideoId == videoID {
+				playlistItemID = item.Id
+				break
+			}
+		}
+
+		if playlistItemID != "" || response.NextPageToken == "" {
 			break
 		}
+
+		pageToken = response.NextPageToken
 	}
 
 	if playlistItemID == "" {
@@ -296,7 +316,9 @@ func (s *Service) RemoveVideoFromPlaylist(ctx context.Context, playlistID, video
 		return fmt.Errorf("error removing video from playlist: %v", err)
 	}
 
-	s.store.RemoveTrackAddition(videoID)
+	if err := s.store.RemoveTrackAddition(videoID); err != nil {
+		log.Printf("warning: failed to remove track addition video=%s err=%v", videoID, err)
+	}
 
 	return nil
 }

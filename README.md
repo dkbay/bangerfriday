@@ -1,10 +1,10 @@
 # Banger Friday 🎵
 
-A shared playlist app for Friday bangers with Spotify integration.
+A shared playlist app for Friday bangers with YouTube integration.
 
 ## Features
 
-- **Spotify OAuth** - Users login with Spotify to add tracks
+- **YouTube API** - Search and add tracks from YouTube
 - **Daily Playlist** - Automatically creates a playlist for each day
 - **Theme System** - Users suggest themes, admin picks one
 - **Auto-Archive** - End-of-day archive creates permanent playlist
@@ -12,25 +12,25 @@ A shared playlist app for Friday bangers with Spotify integration.
 
 ## Prerequisites
 
-- Go 1.21+
+- Go 1.26+
 - Node.js 20+
-- Spotify Developer Account
+- Google Cloud project with YouTube Data API access
 
 ## Setup
 
-### 1. Spotify App Setup
+### 1. YouTube App Setup
 
-1. Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-2. Create a new app
+1. Create OAuth credentials in Google Cloud Console
+2. Enable YouTube Data API v3
 3. Add redirect URI: `http://localhost:8080/auth/callback`
-4. Get Client ID and Client Secret
+4. Get Client ID, Client Secret, and a Refresh Token
 
 ### 2. Local Development
 
 ```bash
 # Copy environment file
 cp .env.example .env
-# Edit .env with your Spotify credentials
+# Edit .env with your YouTube credentials
 
 # Backend
 cd backend
@@ -54,9 +54,11 @@ docker-compose up --build
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| SPOTIFY_CLIENT_ID | From Spotify Dashboard | required |
-| SPOTIFY_CLIENT_SECRET | From Spotify Dashboard | required |
-| REDIRECT_URI | OAuth callback URL | http://localhost:8080/auth/callback |
+| YOUTUBE_CLIENT_ID | From Google Cloud OAuth credentials | required |
+| YOUTUBE_CLIENT_SECRET | From Google Cloud OAuth credentials | required |
+| YOUTUBE_REFRESH_TOKEN | OAuth refresh token for playlist operations | required |
+| YOUTUBE_REDIRECT_URL | OAuth callback URL | http://localhost:8080/auth/callback |
+| ADMIN_USERS | Comma-separated admin names | lbk,mby |
 | ADMIN_PASSWORD | Password to make users admin | changeme |
 
 ## Making Someone Admin
@@ -79,14 +81,14 @@ curl -X POST http://localhost:8080/auth/make-admin \
 
 ## Project Structure
 
-```
+```text
 banger-friday/
 ├── backend/
 │   ├── cmd/main.go         # Entry point
 │   ├── internal/
 │   │   ├── handlers/       # HTTP handlers
 │   │   ├── models/         # Database models
-│   │   ├── spotify/        # Spotify API service
+│   │   ├── youtube/        # YouTube API service
 │   │   └── db/             # Database setup
 │   └── go.mod
 ├── frontend/

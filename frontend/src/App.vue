@@ -186,7 +186,6 @@
       </section>
     </main>
 
-    <script src="https://www.youtube.com/iframe_api"></script>
   </div>
 </template>
 
@@ -217,14 +216,15 @@ export default {
       loopEnabled: localStorage.getItem('bangerfriday_loop') === 'true',
       shuffleEnabled: localStorage.getItem('bangerfriday_shuffle') === 'true',
       shuffleOrder: [],
-      waitingForNewTracks: false
+      waitingForNewTracks: false,
+      userIsAdmin: false,
+      youtubeInitAttempts: 0,
+      maxYouTubeInitRetries: 50
     }
   },
   computed: {
     isAdmin() {
-      if (!this.userName) return false
-      const name = this.userName.toLowerCase()
-      return name === 'lbk' || name === 'mby'
+      return this.userIsAdmin
     },
     currentTrack() {
       if (this.currentIndex >= 0 && this.currentIndex < this.tracks.length) {
@@ -234,6 +234,11 @@ export default {
     }
   },
   async mounted() {
+    window.onYouTubeIframeAPIReady = () => {
+      this.youtubeInitAttempts = 0
+      this.initYouTubePlayer()
+    }
+
     this.userName = localStorage.getItem('bangerfriday_name') || ''
     if (this.userName) {
       await this.apiCall('/api/user/set-name', {
@@ -256,6 +261,9 @@ export default {
     }
     if (this.refreshInterval) {
       clearInterval(this.refreshInterval)
+    }
+    if (window.onYouTubeIframeAPIReady) {
+      window.onYouTubeIframeAPIReady = null
     }
   },
   watch: {
@@ -292,6 +300,7 @@ export default {
   methods: {
     initYouTubePlayer() {
       if (window.YT && window.YT.Player) {
+        this.youtubeInitAttempts = 0
         this.player = new window.YT.Player('youtube-player', {
           height: '360',
           width: '100%',
@@ -318,8 +327,11 @@ export default {
             }
           }
         })
-      } else {
+      } else if (this.youtubeInitAttempts < this.maxYouTubeInitRetries) {
+        this.youtubeInitAttempts += 1
         setTimeout(() => this.initYouTubePlayer(), 100)
+      } else {
+        console.error('YouTube API failed to load after retries')
       }
     },
     playTrack(index) {
@@ -403,15 +415,31 @@ export default {
       this.shuffleOrder = indices
     },
     async apiCall(endpoint, options = {}) {
-      const response = await fetch(endpoint, {
-        ...options,
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers
+      try {
+        const response = await fetch(endpoint, {
+          ...options,
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            ...options.headers
+          }
+        })
+
+        const contentType = response.headers.get('content-type') || ''
+        const body = contentType.includes('application/json')
+          ? await response.json().catch(() => ({}))
+          : {}
+
+        if (!response.ok) {
+          return {
+            error: body.error || `${response.status} ${response.statusText}`.trim()
+          }
         }
-      })
-      return response.json()
+
+        return body
+      } catch (e) {
+        return { error: `network error: ${e.message}` }
+      }
     },
     showNotification(message, type = 'info') {
       this.notification = { message, type }
@@ -457,15 +485,17 @@ export default {
     },
     async loadData() {
       try {
-        const [themeData, playlistData, archiveData] = await Promise.all([
+        const [themeData, playlistData, archiveData, adminData] = await Promise.all([
           this.apiCall('/api/theme'),
           this.apiCall('/api/playlist/today'),
-          this.apiCall('/api/archive')
+          this.apiCall('/api/archive'),
+          this.apiCall('/api/admin')
         ])
-        
+
         this.theme = themeData.theme || ''
         this.tracks = playlistData.tracks || []
         this.archives = archiveData.archives || []
+        this.userIsAdmin = Boolean(adminData && adminData.is_admin)
         
         if (this.isAdmin) {
           const suggestionsData = await this.apiCall('/api/theme/suggestions')

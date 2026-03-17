@@ -1,8 +1,10 @@
 package handlers
 
 import (
-	"fmt"
+	"database/sql"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"banger-friday/internal/models"
@@ -12,21 +14,46 @@ import (
 )
 
 type Config struct {
-	ServerPort string
+	ServerPort    string
+	AdminUsersCSV string
 }
 
 type APIHandler struct {
 	youtubeService *internalyoutube.Service
 	store          *models.Store
 	config         Config
+	adminUsers     map[string]struct{}
 }
 
 func NewAPIHandler(youtubeService *internalyoutube.Service, store *models.Store, config Config) *APIHandler {
+	adminUsers := make(map[string]struct{})
+	for _, user := range strings.Split(config.AdminUsersCSV, ",") {
+		normalized := strings.TrimSpace(strings.ToLower(user))
+		if normalized != "" {
+			adminUsers[normalized] = struct{}{}
+		}
+	}
+
 	return &APIHandler{
 		youtubeService: youtubeService,
 		store:          store,
 		config:         config,
+		adminUsers:     adminUsers,
 	}
+}
+
+func (h *APIHandler) requesterName(c *gin.Context) string {
+	userName, _ := c.Cookie("user_name")
+	return strings.TrimSpace(userName)
+}
+
+func (h *APIHandler) isRequesterAdmin(c *gin.Context) bool {
+	userName := strings.ToLower(h.requesterName(c))
+	if userName == "" {
+		return false
+	}
+	_, ok := h.adminUsers[userName]
+	return ok
 }
 
 func (h *APIHandler) GetTheme(c *gin.Context) {
@@ -39,7 +66,7 @@ func (h *APIHandler) GetTheme(c *gin.Context) {
 }
 
 func (h *APIHandler) SubmitTheme(c *gin.Context) {
-	userName, _ := c.Cookie("user_name")
+	userName := h.requesterName(c)
 	if userName == "" {
 		userName = "Anonymous"
 	}
@@ -65,7 +92,8 @@ func (h *APIHandler) SubmitTheme(c *gin.Context) {
 	}
 
 	suggestion := &models.ThemeSuggestion{
-		UserID:    1,
+		UserID:    0,
+		UserName:  userName,
 		Theme:     request.Theme,
 		Status:    "pending",
 		CreatedAt: time.Now().Unix(),
@@ -81,8 +109,7 @@ func (h *APIHandler) SubmitTheme(c *gin.Context) {
 }
 
 func (h *APIHandler) PickTheme(c *gin.Context) {
-	userID, err := h.store.GetUserByID(1)
-	if err != nil || !userID.IsAdmin {
+	if !h.isRequesterAdmin(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
 		return
 	}
@@ -96,7 +123,7 @@ func (h *APIHandler) PickTheme(c *gin.Context) {
 	}
 
 	date := time.Now().Format("2006-01-02")
-	err = h.store.UpsertDailyPlaylistTheme(date, request.Theme)
+	err := h.store.UpsertDailyPlaylistTheme(date, request.Theme)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update theme"})
 		return
@@ -123,7 +150,23 @@ func (h *APIHandler) DeleteThemeSuggestion(c *gin.Context) {
 		return
 	}
 
-	err := h.store.DeleteThemeSuggestion(request.ID)
+	suggestion, err := h.store.GetThemeSuggestionByID(request.ID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "suggestion not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load suggestion"})
+		return
+	}
+
+	requester := h.requesterName(c)
+	if !h.isRequesterAdmin(c) && !strings.EqualFold(requester, suggestion.UserName) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not allowed to delete this suggestion"})
+		return
+	}
+
+	err = h.store.DeleteThemeSuggestion(request.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete suggestion"})
 		return
@@ -150,7 +193,7 @@ func (h *APIHandler) GetTodayPlaylist(c *gin.Context) {
 		return
 	}
 
-	var trackList []gin.H
+	trackList := make([]gin.H, 0, len(videos))
 	for _, v := range videos {
 		trackList = append(trackList, gin.H{
 			"id":        v.Video.ID,
@@ -215,7 +258,7 @@ func (h *APIHandler) AddToPlaylist(c *gin.Context) {
 
 	err = h.youtubeService.AddVideoToPlaylist(c.Request.Context(), playlistID, request.TrackID, userName)
 	if err != nil {
-		fmt.Printf("Error adding track: %v\n", err)
+		log.Printf("error adding track %s to playlist %s: %v", request.TrackID, playlistID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add track"})
 		return
 	}
@@ -232,12 +275,12 @@ func (h *APIHandler) SearchTracks(c *gin.Context) {
 
 	videos, err := h.youtubeService.SearchVideos(query)
 	if err != nil {
-		fmt.Printf("Search error: %v\n", err)
+		log.Printf("search error for query %q: %v", query, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search"})
 		return
 	}
 
-	var results []gin.H
+	results := make([]gin.H, 0, len(videos))
 	for _, video := range videos {
 		results = append(results, gin.H{
 			"id":        video.ID,
@@ -267,9 +310,32 @@ func (h *APIHandler) RemoveFromPlaylist(c *gin.Context) {
 		return
 	}
 
+	requester := h.requesterName(c)
+	if requester == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "name is required"})
+		return
+	}
+
+	if !h.isRequesterAdmin(c) {
+		addition, err := h.store.GetTrackAdditionByVideoID(date, request.TrackID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusForbidden, gin.H{"error": "only admins can remove this track"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to validate track ownership"})
+			return
+		}
+
+		if !strings.EqualFold(addition.AddedBy, requester) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "only admins or track owner can remove"})
+			return
+		}
+	}
+
 	err = h.youtubeService.RemoveVideoFromPlaylist(c.Request.Context(), dp.PlaylistID, request.TrackID)
 	if err != nil {
-		fmt.Printf("Error removing track: %v\n", err)
+		log.Printf("error removing track %s from playlist %s: %v", request.TrackID, dp.PlaylistID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to remove track"})
 		return
 	}
@@ -278,6 +344,11 @@ func (h *APIHandler) RemoveFromPlaylist(c *gin.Context) {
 }
 
 func (h *APIHandler) ArchivePlaylist(c *gin.Context) {
+	if !h.isRequesterAdmin(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin only"})
+		return
+	}
+
 	date := time.Now().Format("2006-01-02")
 	dp, err := h.store.GetDailyPlaylist(date)
 	if err != nil {
@@ -305,7 +376,7 @@ func (h *APIHandler) GetArchives(c *gin.Context) {
 }
 
 func (h *APIHandler) IsAdmin(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"is_admin": true})
+	c.JSON(http.StatusOK, gin.H{"is_admin": h.isRequesterAdmin(c)})
 }
 
 func (h *APIHandler) SetUserName(c *gin.Context) {

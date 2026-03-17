@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"banger-friday/internal/db"
@@ -21,6 +23,7 @@ type Config struct {
 	YouTubeClientSecret string
 	YouTubeRefreshToken string
 	ServerPort          string
+	AdminUsers          string
 }
 
 func loadConfig() Config {
@@ -29,6 +32,7 @@ func loadConfig() Config {
 		YouTubeClientSecret: getEnv("YOUTUBE_CLIENT_SECRET", ""),
 		YouTubeRefreshToken: getEnv("YOUTUBE_REFRESH_TOKEN", ""),
 		ServerPort:          getEnv("SERVER_PORT", "8080"),
+		AdminUsers:          getEnv("ADMIN_USERS", "lbk,mby"),
 	}
 }
 
@@ -80,7 +84,7 @@ func main() {
 	store := models.NewStore(database)
 	youtubeService := youtube.NewService(config.YouTubeRefreshToken, store)
 	startYouTubeTokenKeepAlive(youtubeService)
-	apiHandler := handlers.NewAPIHandler(youtubeService, store, handlers.Config{ServerPort: config.ServerPort})
+	apiHandler := handlers.NewAPIHandler(youtubeService, store, handlers.Config{ServerPort: config.ServerPort, AdminUsersCSV: config.AdminUsers})
 
 	router := gin.Default()
 	router.Use(cors.New(cors.Config{
@@ -114,8 +118,26 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
+	srv := &http.Server{
+		Addr:    ":" + config.ServerPort,
+		Handler: router,
+	}
+
 	log.Printf("Server starting on port %s", config.ServerPort)
-	if err := router.Run(":" + config.ServerPort); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutdown signal received")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
 	}
 }

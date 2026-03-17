@@ -2,6 +2,7 @@ package models
 
 import (
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -150,9 +151,9 @@ func (s *Store) UpdateDailyPlaylistID(date, playlistID string) error {
 
 func (s *Store) AddThemeSuggestion(ts *ThemeSuggestion) (int64, error) {
 	result, err := s.db.Exec(`
-		INSERT INTO theme_suggestions (user_id, theme, status, created_at)
-		VALUES (?, ?, ?, ?)
-	`, ts.UserID, ts.Theme, ts.Status, ts.CreatedAt)
+		INSERT INTO theme_suggestions (user_id, user_name, theme, status, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, ts.UserID, ts.UserName, ts.Theme, ts.Status, ts.CreatedAt)
 	if err != nil {
 		return 0, err
 	}
@@ -161,9 +162,8 @@ func (s *Store) AddThemeSuggestion(ts *ThemeSuggestion) (int64, error) {
 
 func (s *Store) GetThemeSuggestions(status string) ([]ThemeSuggestion, error) {
 	rows, err := s.db.Query(`
-		SELECT ts.id, ts.user_id, ts.theme, ts.status, ts.created_at, u.display_name
+		SELECT ts.id, ts.user_id, ts.theme, ts.status, ts.created_at, COALESCE(ts.user_name, '')
 		FROM theme_suggestions ts
-		JOIN users u ON ts.user_id = u.id
 		WHERE ts.status = ?
 		ORDER BY ts.created_at DESC
 	`, status)
@@ -180,7 +180,23 @@ func (s *Store) GetThemeSuggestions(status string) ([]ThemeSuggestion, error) {
 		}
 		suggestions = append(suggestions, ts)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return suggestions, nil
+}
+
+func (s *Store) GetThemeSuggestionByID(id int64) (*ThemeSuggestion, error) {
+	var ts ThemeSuggestion
+	err := s.db.QueryRow(`
+		SELECT id, user_id, theme, status, created_at, COALESCE(user_name, '')
+		FROM theme_suggestions
+		WHERE id = ?
+	`, id).Scan(&ts.ID, &ts.UserID, &ts.Theme, &ts.Status, &ts.CreatedAt, &ts.UserName)
+	if err != nil {
+		return nil, err
+	}
+	return &ts, nil
 }
 
 func (s *Store) DeleteThemeSuggestion(id int64) error {
@@ -192,7 +208,10 @@ func (s *Store) GetCurrentTheme() (string, error) {
 	date := time.Now().Format("2006-01-02")
 	dp, err := s.GetDailyPlaylist(date)
 	if err != nil {
-		return "", nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
 	}
 	return dp.Theme, nil
 }
@@ -226,6 +245,9 @@ func (s *Store) GetArchives() ([]Archive, error) {
 			return nil, err
 		}
 		archives = append(archives, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return archives, nil
 }
@@ -283,5 +305,23 @@ func (s *Store) GetTrackAdditions(date string) ([]TrackAddition, error) {
 		}
 		additions = append(additions, t)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return additions, nil
+}
+
+func (s *Store) GetTrackAdditionByVideoID(date, videoID string) (*TrackAddition, error) {
+	var track TrackAddition
+	err := s.db.QueryRow(`
+		SELECT id, video_id, date, added_by, created_at
+		FROM track_additions
+		WHERE date = ? AND video_id = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, date, videoID).Scan(&track.ID, &track.VideoID, &track.Date, &track.AddedBy, &track.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &track, nil
 }

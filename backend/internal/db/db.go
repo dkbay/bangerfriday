@@ -2,23 +2,13 @@ package db
 
 import (
 	"database/sql"
+	"strings"
+
 	_ "github.com/mattn/go-sqlite3"
-	"os"
 )
 
 func InitDB() (*sql.DB, error) {
 	dbPath := "banger.db"
-	
-	_, err := os.Stat(dbPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			file, err := os.Create(dbPath)
-			if err != nil {
-				return nil, err
-			}
-			file.Close()
-		}
-	}
 
 	database, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
@@ -49,10 +39,18 @@ func createTables(db *sql.DB) error {
 	CREATE TABLE IF NOT EXISTS theme_suggestions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		user_id INTEGER,
+		user_name TEXT,
 		theme TEXT,
 		status TEXT DEFAULT 'pending',
 		created_at INTEGER,
 		FOREIGN KEY(user_id) REFERENCES users(id)
+	);`
+
+	userNamesTable := `
+	CREATE TABLE IF NOT EXISTS user_names (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT,
+		created_at INTEGER
 	);`
 
 	dailyPlaylistsTable := `
@@ -74,12 +72,26 @@ func createTables(db *sql.DB) error {
 		created_at INTEGER
 	);`
 
+	trackAdditionsTable := `
+	CREATE TABLE IF NOT EXISTS track_additions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		video_id TEXT,
+		date TEXT,
+		added_by TEXT,
+		created_at INTEGER
+	);`
+
 	_, err := db.Exec(usersTable)
 	if err != nil {
 		return err
 	}
 
 	_, err = db.Exec(themeSuggestionsTable)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(userNamesTable)
 	if err != nil {
 		return err
 	}
@@ -92,6 +104,31 @@ func createTables(db *sql.DB) error {
 	_, err = db.Exec(archivesTable)
 	if err != nil {
 		return err
+	}
+
+	_, err = db.Exec(trackAdditionsTable)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec("ALTER TABLE theme_suggestions ADD COLUMN user_name TEXT")
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_users_spotify_id ON users(spotify_id)",
+		"CREATE INDEX IF NOT EXISTS idx_users_is_admin ON users(is_admin)",
+		"CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)",
+		"CREATE INDEX IF NOT EXISTS idx_theme_suggestions_user_id ON theme_suggestions(user_id)",
+		"CREATE INDEX IF NOT EXISTS idx_theme_suggestions_status_created_at ON theme_suggestions(status, created_at)",
+		"CREATE INDEX IF NOT EXISTS idx_track_additions_date ON track_additions(date)",
+	}
+
+	for _, indexStmt := range indexes {
+		if _, err := db.Exec(indexStmt); err != nil {
+			return err
+		}
 	}
 
 	return nil
